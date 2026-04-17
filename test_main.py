@@ -4,13 +4,15 @@ import time
 from fastapi.testclient import TestClient
 
 from main import (
-    AutonomousQuantAuditor,
     CompanyProfile,
     MarketData,
+    MultiAgentChecker,
     PriceSnapshot,
+    StrategistProposal,
     TLHAnalysisResult,
     TaxEngine,
     TwinMatch,
+    AuditVerdict,
     build_app,
 )
 
@@ -31,7 +33,7 @@ class FakeMarketData:
         return self.price_snapshot
 
 
-class FakeAuditor:
+class FakeChecker:
     def __init__(self, result: TLHAnalysisResult):
         self.result = result
         self.calls: list[dict[str, object]] = []
@@ -63,12 +65,14 @@ def sample_company() -> CompanyProfile:
     )
 
 
-def sample_twin() -> TwinMatch:
+def sample_twin(ticker: str = "MSFT", similarity: float = 0.91) -> TwinMatch:
     return TwinMatch(
-        ticker="MSFT",
-        security_name="Microsoft Corporation",
-        description="Technology company with software, cloud, devices, and productivity platforms.",
-        similarity=0.91,
+        ticker=ticker,
+        security_name="Microsoft Corporation" if ticker == "MSFT" else "Alphabet Inc. Class C",
+        description="Technology company with software, cloud, devices, and productivity platforms."
+        if ticker == "MSFT"
+        else "Internet services and advertising platform.",
+        similarity=similarity,
     )
 
 
@@ -101,19 +105,19 @@ def build_test_engine(
     *,
     company: CompanyProfile | None,
     price_snapshot: PriceSnapshot | None,
-    auditor_result: TLHAnalysisResult | None = None,
-) -> tuple[TaxEngine, FakeAuditor]:
-    fake_auditor = FakeAuditor(auditor_result or sample_harvest_result())
+    checker_result: TLHAnalysisResult | None = None,
+) -> tuple[TaxEngine, FakeChecker]:
+    fake_checker = FakeChecker(checker_result or sample_harvest_result())
     engine = TaxEngine(
         db=FakeDB(company=company),
         market_data=FakeMarketData(price_snapshot=price_snapshot),
-        auditor=fake_auditor,
+        checker=fake_checker,
     )
-    return engine, fake_auditor
+    return engine, fake_checker
 
 
 def test_tax_engine_returns_hold_for_gain():
-    engine, fake_auditor = build_test_engine(
+    engine, fake_checker = build_test_engine(
         company=sample_company(),
         price_snapshot=sample_price(250.0),
     )
@@ -124,11 +128,11 @@ def test_tax_engine_returns_hold_for_gain():
     assert result.gain_per_share == 50.0
     assert result.twin is None
     assert result.suitability_memo == []
-    assert fake_auditor.calls == []
+    assert fake_checker.calls == []
 
 
-def test_tax_engine_uses_agentic_auditor_for_loss():
-    engine, fake_auditor = build_test_engine(
+def test_tax_engine_uses_checker_for_loss():
+    engine, fake_checker = build_test_engine(
         company=sample_company(),
         price_snapshot=sample_price(150.0),
     )
@@ -140,7 +144,7 @@ def test_tax_engine_uses_agentic_auditor_for_loss():
     assert result.twin is not None
     assert result.twin.ticker == "MSFT"
     assert len(result.suitability_memo) == 3
-    assert fake_auditor.calls[0]["session_id"] == "client-123"
+    assert fake_checker.calls[0]["session_id"] == "client-123"
 
 
 def test_tax_engine_raises_for_missing_company():
@@ -222,13 +226,71 @@ def test_market_data_uses_ttl_cache(monkeypatch):
     assert call_count["count"] == 1
 
 
-def test_agent_memory_reuses_session_window():
-    auditor = AutonomousQuantAuditor.__new__(AutonomousQuantAuditor)
-    auditor._session_memories = {}
+def test_checker_memory_reuses_session_window():
+    checker = MultiAgentChecker.__new__(MultiAgentChecker)
+    checker._strategist_memories = {}
 
-    first = auditor._get_memory("abc")
-    second = auditor._get_memory("abc")
-    third = auditor._get_memory("xyz")
+    first = checker._get_strategist_memory("abc")
+    second = checker._get_strategist_memory("abc")
+    third = checker._get_strategist_memory("xyz")
 
     assert first is second
     assert first is not third
+
+
+def test_checker_loops_until_auditor_approves():
+    checker = MultiAgentChecker.__new__(MultiAgentChecker)
+    checker._strategist_memories = {}
+
+    proposals = [
+        StrategistProposal(
+            proposed_twin=sample_twin("GOOG", 0.98),
+            rationale="Closest semantic match.",
+        ),
+        StrategistProposal(
+            proposed_twin=sample_twin("MSFT", 0.91),
+            rationale="Next best match after rejection.",
+        ),
+    ]
+    verdicts = [
+        AuditVerdict(
+            verdict="REJECTED",
+            explanation="This is effectively the same issuer exposure. Try again.",
+            suitability_memo=[],
+        ),
+        AuditVerdict(
+            verdict="APPROVED",
+            explanation="Acceptable replacement.",
+            suitability_memo=[
+                "- Apple and Microsoft both sit in large-cap technology ecosystems.",
+                "- Microsoft is a distinct issuer, not a share-class variant of Apple.",
+                "- The overlap is strong for exposure goals without looking substantially identical.",
+            ],
+        ),
+    ]
+
+    async def fake_run_strategist(company, session_id, rejected_tickers, auditor_feedback):
+        if rejected_tickers:
+            assert rejected_tickers == ["GOOG"]
+            assert "same issuer exposure" in auditor_feedback
+        return proposals.pop(0)
+
+    async def fake_run_auditor(company, proposal):
+        return verdicts.pop(0)
+
+    checker._run_strategist = fake_run_strategist
+    checker._run_auditor = fake_run_auditor
+
+    result = asyncio.run(
+        checker.analyze_loss_opportunity(
+            company=sample_company(),
+            buy_price=200.0,
+            price_snapshot=sample_price(150.0),
+            session_id="session-1",
+        )
+    )
+
+    assert result.status == "HARVEST"
+    assert result.twin is not None
+    assert result.twin.ticker == "MSFT"
+    assert len(result.suitability_memo) == 3
