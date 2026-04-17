@@ -13,6 +13,7 @@ from main import (
     TaxEngine,
     TwinMatch,
     AuditVerdict,
+    MemoOutput,
     build_app,
 )
 
@@ -256,17 +257,20 @@ def test_checker_loops_until_auditor_approves():
         AuditVerdict(
             verdict="REJECTED",
             explanation="This is effectively the same issuer exposure. Try again.",
-            suitability_memo=[],
         ),
         AuditVerdict(
             verdict="APPROVED",
             explanation="Acceptable replacement.",
+        ),
+    ]
+    memos = [
+        MemoOutput(
             suitability_memo=[
                 "- Apple and Microsoft both sit in large-cap technology ecosystems.",
                 "- Microsoft is a distinct issuer, not a share-class variant of Apple.",
                 "- The overlap is strong for exposure goals without looking substantially identical.",
-            ],
-        ),
+            ]
+        )
     ]
 
     async def fake_run_strategist(company, session_id, rejected_tickers, auditor_feedback):
@@ -278,8 +282,13 @@ def test_checker_loops_until_auditor_approves():
     async def fake_run_auditor(company, proposal):
         return verdicts.pop(0)
 
+    async def fake_run_memo_writer(company, proposal, verdict):
+        assert verdict.verdict == "APPROVED"
+        return memos.pop(0)
+
     checker._run_strategist = fake_run_strategist
     checker._run_auditor = fake_run_auditor
+    checker._run_memo_writer = fake_run_memo_writer
 
     result = asyncio.run(
         checker.analyze_loss_opportunity(
@@ -294,3 +303,45 @@ def test_checker_loops_until_auditor_approves():
     assert result.twin is not None
     assert result.twin.ticker == "MSFT"
     assert len(result.suitability_memo) == 3
+
+
+def test_checker_raises_after_three_rejections():
+    checker = MultiAgentChecker.__new__(MultiAgentChecker)
+    checker._strategist_memories = {}
+
+    proposals = [
+        StrategistProposal(proposed_twin=sample_twin("GOOG", 0.98), rationale="First try."),
+        StrategistProposal(proposed_twin=sample_twin("META", 0.92), rationale="Second try."),
+        StrategistProposal(proposed_twin=sample_twin("ADBE", 0.88), rationale="Third try."),
+    ]
+    verdicts = [
+        AuditVerdict(verdict="REJECTED", explanation="Same issuer issue."),
+        AuditVerdict(verdict="REJECTED", explanation="Still too close."),
+        AuditVerdict(verdict="REJECTED", explanation="No clean substitute."),
+    ]
+
+    async def fake_run_strategist(company, session_id, rejected_tickers, auditor_feedback):
+        return proposals.pop(0)
+
+    async def fake_run_auditor(company, proposal):
+        return verdicts.pop(0)
+
+    async def fake_run_memo_writer(company, proposal, verdict):
+        assert False, "Memo writer should not run on rejected candidates"
+
+    checker._run_strategist = fake_run_strategist
+    checker._run_auditor = fake_run_auditor
+    checker._run_memo_writer = fake_run_memo_writer
+
+    try:
+        asyncio.run(
+            checker.analyze_loss_opportunity(
+                company=sample_company(),
+                buy_price=200.0,
+                price_snapshot=sample_price(150.0),
+                session_id="session-2",
+            )
+        )
+        assert False, "Expected ValueError"
+    except ValueError as exc:
+        assert "No compliant replacement found after 3 review cycles" in str(exc)

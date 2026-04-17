@@ -83,6 +83,9 @@ class StrategistProposal(BaseModel):
 class AuditVerdict(BaseModel):
     verdict: str
     explanation: str
+
+
+class MemoOutput(BaseModel):
     suitability_memo: list[str] = Field(default_factory=list)
 
 
@@ -167,8 +170,10 @@ class MultiAgentChecker:
         self.market_data = market_data
         self.strategist_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
         self.auditor_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
+        self.memo_writer_llm = ChatOpenAI(model="gpt-4o-mini", temperature=0, api_key=api_key)
         self.proposal_parser = PydanticOutputParser(pydantic_object=StrategistProposal)
         self.audit_parser = PydanticOutputParser(pydantic_object=AuditVerdict)
+        self.memo_parser = PydanticOutputParser(pydantic_object=MemoOutput)
         self._strategist_memories: dict[str, ConversationBufferWindowMemory] = {}
 
     def _get_strategist_memory(self, session_id: str) -> ConversationBufferWindowMemory:
@@ -313,7 +318,7 @@ class MultiAgentChecker:
             
             "RESPONSE PROTOCOL:\n"
             "- If REJECTED: Provide a blunt, one-sentence legal reason why they are the same entity.\n"
-            "- If APPROVED: Provide exactly 3 bullet points in suitability_memo explaining why this swap maintains market exposure while being legally distinct.\n\n"
+            "- If APPROVED: Provide a concise explanation of why the pair is legally distinct and acceptable.\n\n"
             
             "Return JSON only.\n"
             f"{self.audit_parser.get_format_instructions()}"
@@ -338,6 +343,43 @@ class MultiAgentChecker:
         )
         return self.audit_parser.parse(self._clean_output(response.content))
 
+    async def _run_memo_writer(
+        self,
+        company: CompanyProfile,
+        proposal: StrategistProposal,
+        verdict: AuditVerdict,
+    ) -> MemoOutput:
+        system_prompt = (
+            "You are the Suitability Memo Writer for a wealth management platform.\n"
+            "Write a client-ready suitability memo for an approved tax-loss harvesting replacement.\n"
+            "Provide exactly 3 bullet strings in suitability_memo.\n"
+            "Focus on business overlap, preserved market exposure, and legal distinctness.\n"
+            "Do not mention uncertainty, internal process, or rejection history.\n"
+            "Return JSON only.\n"
+            f"{self.memo_parser.get_format_instructions()}"
+        )
+        human_prompt = (
+            "Original stock:\n"
+            f"- Ticker: {company.ticker}\n"
+            f"- Name: {company.security_name or 'Unknown'}\n"
+            f"- Description: {company.description or 'No description available.'}\n\n"
+            "Approved replacement:\n"
+            f"- Ticker: {proposal.proposed_twin.ticker}\n"
+            f"- Name: {proposal.proposed_twin.security_name or 'Unknown'}\n"
+            f"- Description: {proposal.proposed_twin.description or 'No description available.'}\n"
+            f"- Similarity: {proposal.proposed_twin.similarity if proposal.proposed_twin.similarity is not None else 'Unknown'}\n\n"
+            f"Compliance explanation: {verdict.explanation}"
+        )
+        response = await self.memo_writer_llm.ainvoke(
+            [
+                SystemMessage(content=system_prompt),
+                HumanMessage(content=human_prompt),
+            ]
+        )
+        parsed = self.memo_parser.parse(self._clean_output(response.content))
+        parsed.suitability_memo = parsed.suitability_memo[:3]
+        return parsed
+
     async def analyze_loss_opportunity(
         self,
         company: CompanyProfile,
@@ -357,6 +399,7 @@ class MultiAgentChecker:
             last_verdict = verdict
 
             if verdict.verdict.upper() == "APPROVED":
+                memo = await self._run_memo_writer(company, proposal, verdict)
                 return TLHAnalysisResult(
                     status="HARVEST",
                     ticker=company.ticker,
@@ -364,7 +407,7 @@ class MultiAgentChecker:
                     price_data=price_snapshot,
                     loss_per_share=round(buy_price - price_snapshot.current_price, 2),
                     twin=proposal.proposed_twin,
-                    suitability_memo=verdict.suitability_memo[:3],
+                    suitability_memo=memo.suitability_memo,
                 )
 
             rejected_tickers.append(proposal.proposed_twin.ticker.upper())
