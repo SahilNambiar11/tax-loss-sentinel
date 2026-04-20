@@ -25,6 +25,29 @@ type ProposedTrade = {
   memo: string[];
 };
 
+type AnalyzeResult = {
+  status: "HARVEST" | "HOLD";
+  ticker: string;
+  buy_price: number;
+  price_data: {
+    ticker: string;
+    current_price: number;
+    cached: boolean;
+    fetched_at_epoch: number;
+  };
+  loss_per_share?: number | null;
+  gain_per_share?: number | null;
+  twin?: {
+    ticker: string;
+    security_name?: string | null;
+    description?: string | null;
+    similarity?: number | null;
+    sector?: string | null;
+    sub_industry?: string | null;
+  } | null;
+  suitability_memo: string[];
+};
+
 const INITIAL_CLIENTS: Client[] = [
   {
     id: "cl-001",
@@ -78,60 +101,6 @@ const INITIAL_CLIENTS: Client[] = [
   },
 ];
 
-const REPLACEMENT_MAP: Record<string, { ticker: string; similarity: number; memo: string[] }> = {
-  AAPL: {
-    ticker: "MSFT",
-    similarity: 0.94,
-    memo: [
-      "Both issuers provide large-cap technology exposure anchored by sticky enterprise ecosystems and global end-market demand.",
-      "Microsoft preserves software and platform sensitivity while remaining a distinct legal issuer from Apple for wash sale purposes.",
-      "The swap maintains innovation-driven factor exposure with lower realized tax drag and limited style drift.",
-    ],
-  },
-  GOOGL: {
-    ticker: "META",
-    similarity: 0.92,
-    memo: [
-      "Alphabet and Meta both monetize digital advertising and large-scale consumer platforms, preserving internet-services exposure.",
-      "Meta is a separate legal issuer with different governance and product concentration, supporting wash sale distance.",
-      "The rotation keeps communication-services growth exposure intact while harvesting the embedded tax loss.",
-    ],
-  },
-  NVDA: {
-    ticker: "AMD",
-    similarity: 0.91,
-    memo: [
-      "NVIDIA and AMD both express semiconductor and accelerated-computing demand across AI and data center markets.",
-      "AMD offers comparable chip-cycle sensitivity without constituting the same issuer or share-class variant.",
-      "The trade keeps high-beta compute exposure in place while crystallizing the unrealized loss.",
-    ],
-  },
-  AMZN: {
-    ticker: "MELI",
-    similarity: 0.9,
-    memo: [
-      "Amazon and MercadoLibre both combine commerce-platform economics with scaled digital payments optionality.",
-      "MercadoLibre is a distinct issuer with separate geography and operating structure, reducing wash sale concern.",
-      "The substitute maintains platform-growth exposure while improving tax efficiency in the portfolio.",
-    ],
-  },
-  TSLA: {
-    ticker: "RIVN",
-    similarity: 0.89,
-    memo: [
-      "Tesla and Rivian both provide EV adoption sensitivity and innovation-led automotive exposure.",
-      "Rivian is a separate legal entity with materially different scale and execution profile, preserving compliance distance.",
-      "The switch retains clean-transport upside while monetizing the tax loss on Tesla.",
-    ],
-  },
-};
-
-const AGENT_LOGS = [
-  "Strategist: Checking correlation matrix...",
-  "Auditor: Checking Wash Sale compliance (Section 1091)...",
-  "Writer: Finalizing trade rationale memo...",
-];
-
 const STATUS_AGENTS = [
   { name: "Strategist", label: "Online" },
   { name: "Auditor", label: "Online" },
@@ -156,90 +125,124 @@ export default function Page() {
   const [isRunning, setIsRunning] = useState(false);
   const [agentLogs, setAgentLogs] = useState<string[]>([]);
   const [proposedTrade, setProposedTrade] = useState<ProposedTrade | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showIntro, setShowIntro] = useState(true);
-  const timeoutRef = useRef<number[]>([]);
+  const runIdRef = useRef(0);
 
   const activeClient = useMemo(
     () => clients.find((client) => client.id === activeClientId) ?? clients[0],
     [activeClientId, clients],
   );
 
-  const topLossHolding = useMemo(() => {
-    if (!activeClient) {
-      return null;
-    }
-    return [...activeClient.holdings]
-      .map((holding) => ({
-        holding,
-        loss: calculateUnrealizedLoss(holding),
-      }))
-      .sort((left, right) => right.loss - left.loss)[0]?.holding ?? null;
-  }, [activeClient]);
-
   useEffect(() => {
     return () => {
-      timeoutRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      runIdRef.current += 1;
     };
   }, []);
 
-  const updateHoldingPrice = (ticker: string, nextValue: string) => {
-    const parsed = Number(nextValue);
-    setClients((currentClients) =>
-      currentClients.map((client) =>
-        client.id !== activeClientId
-          ? client
-          : {
-              ...client,
-              holdings: client.holdings.map((holding) =>
-                holding.ticker !== ticker
-                  ? holding
-                  : {
-                      ...holding,
-                      currentPrice: Number.isFinite(parsed) ? parsed : 0,
-                    },
-              ),
-            },
-      ),
-    );
-  };
-
-  const runSentinel = () => {
-    if (!topLossHolding) {
+  const runSentinel = async () => {
+    if (!activeClient) {
       return;
     }
 
-    timeoutRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
-    timeoutRef.current = [];
+    const runId = Date.now();
+    runIdRef.current = runId;
     setIsRunning(true);
     setProposedTrade(null);
     setAgentLogs([]);
+    setStatusMessage(null);
+    setErrorMessage(null);
 
-    AGENT_LOGS.forEach((log, index) => {
-      const timeoutId = window.setTimeout(() => {
-        setAgentLogs((currentLogs) => [...currentLogs, log]);
-      }, index * 1000);
-      timeoutRef.current.push(timeoutId);
-    });
+    const addLog = (message: string) => {
+      if (runIdRef.current !== runId) {
+        return;
+      }
+      setAgentLogs((currentLogs) => [...currentLogs, message]);
+    };
 
-    const finalTimeout = window.setTimeout(() => {
-      const replacement = REPLACEMENT_MAP[topLossHolding.ticker] ?? {
-        ticker: "QQQ",
-        similarity: 0.9,
-        memo: [
-          "The replacement preserves adjacent growth exposure across the same broad innovation complex.",
-          "The substitute is a distinct issuer from the harvested holding, creating cleaner wash sale separation.",
-          "The trade maintains portfolio intent while improving after-tax efficiency in the sandbox portfolio.",
-        ],
-      };
-      setIsRunning(false);
-      setProposedTrade({
-        sellTicker: topLossHolding.ticker,
-        buyTicker: replacement.ticker,
-        similarity: replacement.similarity,
-        memo: replacement.memo,
+    try {
+      addLog(`Sentinel: analyzing ${activeClient.holdings.length} holdings for ${activeClient.name}...`);
+
+      const responses = await Promise.all(
+        activeClient.holdings.map(async (holding) => {
+          addLog(`Strategist: requesting backend analysis for ${holding.ticker}...`);
+
+          const params = new URLSearchParams({
+            ticker: holding.ticker,
+            buy_price: holding.costBasis.toString(),
+            session_id: `${activeClient.id}-${holding.ticker}`,
+          });
+
+          const response = await fetch(`/api/analyze?${params.toString()}`, {
+            method: "GET",
+            cache: "no-store",
+          });
+
+          const payload = (await response.json()) as
+            | { result: AnalyzeResult }
+            | { detail?: string };
+
+          if (!response.ok || !("result" in payload)) {
+            const detail = "detail" in payload && payload.detail ? payload.detail : `Analysis failed for ${holding.ticker}`;
+            throw new Error(detail);
+          }
+
+          return {
+            holding,
+            analysis: payload.result,
+          };
+        }),
+      );
+
+      if (runIdRef.current !== runId) {
+        return;
+      }
+
+      responses.forEach(({ holding, analysis }) => {
+        addLog(
+          analysis.status === "HARVEST"
+            ? `Auditor: ${holding.ticker} cleared for harvesting with ${analysis.twin?.ticker ?? "no substitute"} as the replacement.`
+            : `Auditor: ${holding.ticker} is currently a hold based on live pricing.`,
+        );
       });
-    }, 3200);
-    timeoutRef.current.push(finalTimeout);
+
+      const harvestCandidates = responses
+        .filter(({ analysis }) => analysis.status === "HARVEST" && analysis.twin)
+        .sort((left, right) => {
+          const leftLoss = (left.analysis.loss_per_share ?? 0) * left.holding.shares;
+          const rightLoss = (right.analysis.loss_per_share ?? 0) * right.holding.shares;
+          return rightLoss - leftLoss;
+        });
+
+      const bestCandidate = harvestCandidates[0];
+
+      if (!bestCandidate || !bestCandidate.analysis.twin) {
+        setStatusMessage("No live tax-loss harvesting opportunity was found for this client.");
+        addLog("Writer: no harvestable positions found in the current backend scan.");
+        return;
+      }
+
+      setProposedTrade({
+        sellTicker: bestCandidate.holding.ticker,
+        buyTicker: bestCandidate.analysis.twin.ticker,
+        similarity: bestCandidate.analysis.twin.similarity ?? 0,
+        memo: bestCandidate.analysis.suitability_memo,
+      });
+      setStatusMessage(`Best opportunity identified from live backend analysis: ${bestCandidate.holding.ticker}.`);
+      addLog(`Writer: finalized memo for ${bestCandidate.holding.ticker} -> ${bestCandidate.analysis.twin.ticker}.`);
+    } catch (error) {
+      if (runIdRef.current !== runId) {
+        return;
+      }
+      const message = error instanceof Error ? error.message : "Unexpected backend error";
+      setErrorMessage(message);
+      addLog(`Sentinel: ${message}`);
+    } finally {
+      if (runIdRef.current === runId) {
+        setIsRunning(false);
+      }
+    }
   };
 
   if (!activeClient) {
@@ -254,7 +257,7 @@ export default function Page() {
             <p className="text-xs uppercase tracking-[0.35em] text-emerald-300/70">Tax-Loss Sentinel</p>
             <h1 className="mt-3 text-2xl font-semibold text-white">Client Sandbox</h1>
             <p className="mt-2 text-sm text-slate-400">
-              Frontend-only simulation for portfolio triage, agent review, and memo reveal.
+              Live portfolio triage powered by backend analysis, agent review, and memo generation.
             </p>
           </div>
 
@@ -270,6 +273,8 @@ export default function Page() {
                     setIsRunning(false);
                     setAgentLogs([]);
                     setProposedTrade(null);
+                    setStatusMessage(null);
+                    setErrorMessage(null);
                   }}
                   className={`w-full rounded-2xl border p-4 text-left transition ${
                     isActive
@@ -319,10 +324,11 @@ export default function Page() {
             <button
               type="button"
               onClick={runSentinel}
+              disabled={isRunning}
               className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-400 px-5 py-3 font-medium text-slate-950 transition hover:bg-emerald-300"
             >
               <Search className="h-4 w-4" />
-              Run Sentinel
+              {isRunning ? "Running..." : "Run Sentinel"}
             </button>
           </div>
 
@@ -347,15 +353,7 @@ export default function Page() {
                         <td className="px-5 py-4 font-medium text-white">{holding.ticker}</td>
                         <td className="px-5 py-4 text-slate-300">{holding.shares}</td>
                         <td className="px-5 py-4 text-slate-300">{formatCurrency(holding.costBasis)}</td>
-                        <td className="px-5 py-4">
-                          <input
-                            type="number"
-                            step="0.01"
-                            value={holding.currentPrice}
-                            onChange={(event) => updateHoldingPrice(holding.ticker, event.target.value)}
-                            className="w-32 rounded-xl border border-slate-700 bg-slate-900 px-3 py-2 text-slate-100 outline-none ring-0 transition focus:border-emerald-400"
-                          />
-                        </td>
+                        <td className="px-5 py-4 text-slate-300">{formatCurrency(holding.currentPrice)}</td>
                         <td className={`px-5 py-4 font-medium ${hasLoss ? "text-rose-400" : "text-emerald-300"}`}>
                           {hasLoss ? formatCurrency(unrealizedLoss) : formatCurrency(unrealizedLoss)}
                         </td>
@@ -378,8 +376,8 @@ export default function Page() {
                     <p className="text-sm font-medium text-emerald-300">Sentinel Runtime</p>
                   </div>
                   <div className="mt-4 space-y-3 font-mono text-sm text-emerald-200">
-                    {agentLogs.map((log) => (
-                      <p key={log} className="animate-pulse">
+                    {agentLogs.map((log, index) => (
+                      <p key={`${index}-${log}`} className="animate-pulse">
                         {log}
                       </p>
                     ))}
@@ -389,6 +387,18 @@ export default function Page() {
               </div>
             ) : null}
           </div>
+
+          {errorMessage ? (
+            <div className="mt-6 rounded-3xl border border-rose-400/20 bg-rose-400/10 p-4 text-sm text-rose-200">
+              {errorMessage}
+            </div>
+          ) : null}
+
+          {statusMessage && !proposedTrade ? (
+            <div className="mt-6 rounded-3xl border border-slate-800 bg-slate-950/70 p-4 text-sm text-slate-300">
+              {statusMessage}
+            </div>
+          ) : null}
 
           {proposedTrade ? (
             <div className="mt-6 rounded-[1.75rem] border border-emerald-400/20 bg-gradient-to-br from-emerald-400/10 via-slate-900 to-slate-950 p-6">
@@ -401,9 +411,10 @@ export default function Page() {
                     </span>
                     <span className="text-slate-500">→</span>
                     <span className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3 text-emerald-200">
-                      Buy {proposedTrade.buyTicker} @ Similarity {proposedTrade.similarity.toFixed(2)}x
+                      Buy {proposedTrade.buyTicker} @ Similarity {proposedTrade.similarity.toFixed(2)}
                     </span>
                   </div>
+                  {statusMessage ? <p className="mt-3 text-sm text-slate-300">{statusMessage}</p> : null}
                 </div>
                 <button
                   type="button"
