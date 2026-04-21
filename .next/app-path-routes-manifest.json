@@ -1,0 +1,7 @@
+{
+  "/api/analyze/route": "/api/analyze",
+  "/api/portfolios/route": "/api/portfolios",
+  "/api/portfolios/[id]/route": "/api/portfolios/[id]",
+  "/_not-found/page": "/_not-found",
+  "/page": "/"
+}

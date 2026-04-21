@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { FileText, Plus, Search, Shield } from "lucide-react";
+import { Copy, ExternalLink, FileText, Plus, Search, Shield } from "lucide-react";
 import AddClientModal from "./components/AddClientModal";
 
 type Holding = {
@@ -49,58 +49,51 @@ type AnalyzeResult = {
   suitability_memo: string[];
 };
 
-const INITIAL_CLIENTS: Client[] = [
-  {
-    id: "cl-001",
-    name: "Maya Chen",
-    riskProfile: "Tax-sensitive growth",
-    holdings: [
-      { ticker: "AAPL", shares: 120, costBasis: 224.15, currentPrice: 197.24 },
-      { ticker: "MSFT", shares: 40, costBasis: 445.3, currentPrice: 421.1 },
-      { ticker: "V", shares: 55, costBasis: 288.4, currentPrice: 276.2 },
-    ],
-  },
-  {
-    id: "cl-002",
-    name: "Daniel Rivera",
-    riskProfile: "Core equity income",
-    holdings: [
-      { ticker: "GOOGL", shares: 32, costBasis: 182.75, currentPrice: 169.4 },
-      { ticker: "META", shares: 18, costBasis: 512.2, currentPrice: 488.1 },
-      { ticker: "ADBE", shares: 22, costBasis: 611.6, currentPrice: 574.85 },
-    ],
-  },
-  {
-    id: "cl-003",
-    name: "Priya Kapoor",
-    riskProfile: "Balanced innovation",
-    holdings: [
-      { ticker: "NVDA", shares: 26, costBasis: 136.8, currentPrice: 119.45 },
-      { ticker: "AMD", shares: 95, costBasis: 171.25, currentPrice: 154.2 },
-      { ticker: "CRM", shares: 37, costBasis: 318.7, currentPrice: 301.4 },
-    ],
-  },
-  {
-    id: "cl-004",
-    name: "Oliver Brooks",
-    riskProfile: "Large-cap quality",
-    holdings: [
-      { ticker: "AMZN", shares: 61, costBasis: 201.55, currentPrice: 183.3 },
-      { ticker: "COST", shares: 15, costBasis: 840.2, currentPrice: 809.75 },
-      { ticker: "NFLX", shares: 21, costBasis: 697.4, currentPrice: 668.5 },
-    ],
-  },
-  {
-    id: "cl-005",
-    name: "Sophia Martinez",
-    riskProfile: "Tech concentration unwind",
-    holdings: [
-      { ticker: "TSLA", shares: 48, costBasis: 241.7, currentPrice: 214.8 },
-      { ticker: "INTU", shares: 14, costBasis: 694.1, currentPrice: 672.25 },
-      { ticker: "NOW", shares: 16, costBasis: 816.45, currentPrice: 788.6 },
-    ],
-  },
-];
+type PortfolioApiRow = {
+  id: string;
+  workspace_id: string;
+  client_name: string;
+  ticker: string;
+  shares: number;
+  cost_basis: number;
+};
+
+const DEFAULT_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001";
+
+function mapPortfolioRowsToClients(rows: PortfolioApiRow[]): Client[] {
+  const grouped = new Map<string, Client>();
+
+  rows.forEach((row) => {
+    const clientKey = row.client_name.trim().toLowerCase();
+    const existing = grouped.get(clientKey);
+
+    if (existing) {
+      existing.holdings.push({
+        ticker: row.ticker.toUpperCase(),
+        shares: row.shares,
+        costBasis: row.cost_basis,
+        currentPrice: null,
+      });
+      return;
+    }
+
+    grouped.set(clientKey, {
+      id: row.id,
+      name: row.client_name,
+      riskProfile: "Workspace portfolio",
+      holdings: [
+        {
+          ticker: row.ticker.toUpperCase(),
+          shares: row.shares,
+          costBasis: row.cost_basis,
+          currentPrice: null,
+        },
+      ],
+    });
+  });
+
+  return Array.from(grouped.values());
+}
 
 const STATUS_AGENTS = [
   { name: "Strategist", label: "Online" },
@@ -124,10 +117,15 @@ function calculateUnrealizedLoss(holding: Holding) {
 }
 
 export default function Page() {
-  const [clients, setClients] = useState<Client[]>(INITIAL_CLIENTS);
-  const [activeClientId, setActiveClientId] = useState(INITIAL_CLIENTS[0]?.id ?? "");
+  const [workspaceId, setWorkspaceId] = useState(DEFAULT_WORKSPACE_ID);
+  const [workspaceInput, setWorkspaceInput] = useState("");
+  const [workspaceDraftOpen, setWorkspaceDraftOpen] = useState(false);
+  const [workspaceCopied, setWorkspaceCopied] = useState(false);
+  const [clients, setClients] = useState<Client[]>([]);
+  const [activeClientId, setActiveClientId] = useState("");
   const [isOpen, setIsOpen] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
+  const [isLoadingWorkspace, setIsLoadingWorkspace] = useState(false);
   const [agentLogs, setAgentLogs] = useState<string[]>([]);
   const [proposedTrade, setProposedTrade] = useState<ProposedTrade | null>(null);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -140,11 +138,98 @@ export default function Page() {
     [activeClientId, clients],
   );
 
+  const loadWorkspacePortfolios = async (targetWorkspaceId: string) => {
+    setIsLoadingWorkspace(true);
+    setErrorMessage(null);
+    setStatusMessage(null);
+    setAgentLogs([]);
+    setProposedTrade(null);
+
+    try {
+      const params = new URLSearchParams({ workspace_id: targetWorkspaceId });
+      const response = await fetch(`/api/portfolios?${params.toString()}`, {
+        method: "GET",
+        cache: "no-store",
+      });
+
+      const payload = (await response.json()) as
+        | { portfolios: PortfolioApiRow[] }
+        | { detail?: string };
+
+      if (!response.ok || !("portfolios" in payload)) {
+        const detail = "detail" in payload && payload.detail ? payload.detail : "Failed to load workspace portfolios.";
+        throw new Error(detail);
+      }
+
+      const mappedClients = mapPortfolioRowsToClients(payload.portfolios);
+      setClients(mappedClients);
+      setActiveClientId(mappedClients[0]?.id ?? "");
+      setStatusMessage(
+        mappedClients.length > 0
+          ? `Workspace ${targetWorkspaceId} loaded: ${mappedClients.length} client${mappedClients.length === 1 ? "" : "s"}.`
+          : "Workspace has no clients yet.",
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unexpected workspace loading error";
+      setErrorMessage(message);
+      setClients([]);
+      setActiveClientId("");
+    } finally {
+      setIsLoadingWorkspace(false);
+    }
+  };
+
   useEffect(() => {
+    const search = new URLSearchParams(window.location.search);
+    const workspaceFromUrl = search.get("workspace");
+    const resolvedWorkspaceId = workspaceFromUrl?.trim() || DEFAULT_WORKSPACE_ID;
+
+    setWorkspaceId(resolvedWorkspaceId);
+    setWorkspaceInput(resolvedWorkspaceId);
+
+    if (!workspaceFromUrl) {
+      search.set("workspace", resolvedWorkspaceId);
+      const query = search.toString();
+      const nextUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
+      window.history.replaceState({}, "", nextUrl);
+    }
+
+    void loadWorkspacePortfolios(resolvedWorkspaceId);
+
     return () => {
       runIdRef.current += 1;
     };
   }, []);
+
+  useEffect(() => {
+    if (!workspaceCopied) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => setWorkspaceCopied(false), 1200);
+    return () => window.clearTimeout(timeoutId);
+  }, [workspaceCopied]);
+
+  const handleCopyWorkspaceId = async () => {
+    try {
+      await navigator.clipboard.writeText(workspaceId);
+      setWorkspaceCopied(true);
+    } catch {
+      setErrorMessage("Unable to copy workspace ID to clipboard.");
+    }
+  };
+
+  const handleOpenWorkspace = () => {
+    const nextWorkspaceId = workspaceInput.trim();
+    if (!nextWorkspaceId) {
+      setErrorMessage("Workspace ID cannot be empty.");
+      return;
+    }
+
+    const nextUrl = new URL(window.location.href);
+    nextUrl.searchParams.set("workspace", nextWorkspaceId);
+    window.location.href = nextUrl.toString();
+  };
 
   const runSentinel = async () => {
     if (!activeClient) {
@@ -176,7 +261,7 @@ export default function Page() {
           const params = new URLSearchParams({
             ticker: holding.ticker,
             buy_price: holding.costBasis.toString(),
-            session_id: `${activeClient.id}-${holding.ticker}`,
+            session_id: `${workspaceId}-${activeClient.id}-${holding.ticker}`,
           });
 
           const response = await fetch(`/api/analyze?${params.toString()}`, {
@@ -272,7 +357,7 @@ export default function Page() {
     }
   };
 
-  if (!activeClient) {
+  if (!activeClient && !isLoadingWorkspace) {
     return null;
   }
 
@@ -348,23 +433,83 @@ export default function Page() {
               ))}
             </div>
           </div>
+
+          <div className="mt-6 rounded-3xl border border-slate-800 bg-slate-950/60 p-4">
+            <p className="text-xs uppercase tracking-[0.35em] text-emerald-300/70">Workspace</p>
+            <div className="mt-3 flex items-center gap-2">
+              <code className="flex-1 rounded-xl border border-slate-700 bg-slate-900/90 px-3 py-2 font-mono text-xs text-slate-200">
+                {workspaceId}
+              </code>
+              <div className="relative">
+                <button
+                  type="button"
+                  onClick={handleCopyWorkspaceId}
+                  className="rounded-xl border border-slate-700 bg-slate-900/90 p-2 text-slate-300 transition hover:border-emerald-400/40 hover:text-emerald-200"
+                  aria-label="Copy workspace ID"
+                  title="Copy workspace ID"
+                >
+                  <Copy className="h-4 w-4" />
+                </button>
+                {workspaceCopied ? (
+                  <span className="absolute -top-8 right-0 rounded-md border border-emerald-400/30 bg-emerald-500/20 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-emerald-200">
+                    Copied!
+                  </span>
+                ) : null}
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setWorkspaceDraftOpen((current) => !current);
+                setWorkspaceInput(workspaceId);
+                setErrorMessage(null);
+              }}
+              className="mt-3 inline-flex w-full items-center justify-center gap-2 rounded-xl border border-emerald-400/20 bg-zinc-900 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-200 transition hover:border-emerald-400/40 hover:bg-zinc-800"
+            >
+              <ExternalLink className="h-3.5 w-3.5 text-emerald-300" />
+              Open Different Workspace
+            </button>
+
+            {workspaceDraftOpen ? (
+              <div className="mt-3 space-y-2">
+                <input
+                  value={workspaceInput}
+                  onChange={(event) => setWorkspaceInput(event.target.value)}
+                  placeholder="Paste workspace ID"
+                  className="w-full rounded-xl border border-slate-700 bg-slate-900/90 px-3 py-2 font-mono text-xs text-white outline-none transition placeholder:text-slate-500 focus:border-emerald-400/60"
+                />
+                <button
+                  type="button"
+                  onClick={handleOpenWorkspace}
+                  className="w-full rounded-xl bg-emerald-500 px-3 py-2 text-xs font-semibold uppercase tracking-[0.2em] text-slate-950 transition hover:bg-emerald-400"
+                >
+                  Open Workspace
+                </button>
+              </div>
+            ) : null}
+          </div>
         </aside>
 
         <section className="rounded-[2rem] border border-slate-800 bg-slate-900/75 p-5 shadow-fintech backdrop-blur">
           <div className="flex flex-col gap-4 border-b border-slate-800 pb-5 md:flex-row md:items-end md:justify-between">
             <div>
               <p className="text-xs uppercase tracking-[0.35em] text-emerald-300/70">Active Client</p>
-              <h2 className="mt-2 text-3xl font-semibold text-white">{activeClient.name}</h2>
-              <p className="mt-2 text-sm text-slate-400">{activeClient.riskProfile}</p>
+              <h2 className="mt-2 text-3xl font-semibold text-white">
+                {activeClient ? activeClient.name : "No Client Selected"}
+              </h2>
+              <p className="mt-2 text-sm text-slate-400">
+                {activeClient ? activeClient.riskProfile : "Load or open a workspace to begin analysis."}
+              </p>
             </div>
             <button
               type="button"
               onClick={runSentinel}
-              disabled={isRunning}
+              disabled={isRunning || isLoadingWorkspace || !activeClient}
               className="inline-flex items-center justify-center gap-2 rounded-2xl bg-emerald-400 px-5 py-3 font-medium text-slate-950 transition hover:bg-emerald-300"
             >
               <Search className="h-4 w-4" />
-              {isRunning ? "Running..." : "Run Sentinel"}
+              {isLoadingWorkspace ? "Loading Workspace..." : isRunning ? "Running..." : "Run Sentinel"}
             </button>
           </div>
 
@@ -381,7 +526,7 @@ export default function Page() {
                   </tr>
                 </thead>
                 <tbody>
-                  {activeClient.holdings.map((holding) => {
+                  {activeClient?.holdings.map((holding) => {
                     const unrealizedLoss = calculateUnrealizedLoss(holding);
                     const hasLoss = (unrealizedLoss ?? 0) > 0;
                     return (
@@ -401,6 +546,10 @@ export default function Page() {
                 </tbody>
               </table>
             </div>
+
+            {!activeClient && !isLoadingWorkspace ? (
+              <div className="p-6 text-sm text-slate-400">No clients found in this workspace yet.</div>
+            ) : null}
 
             {isRunning ? (
               <div className="absolute inset-0 flex items-center justify-center bg-slate-950/90 p-4 backdrop-blur-sm">
@@ -576,23 +725,35 @@ export default function Page() {
       <AddClientModal
         isOpen={isOpen}
         onClose={() => setIsOpen(false)}
-        onCreated={(payload) => {
-          const newClientId = `cl-${Date.now()}`;
-          const newClient = {
-            id: newClientId,
-            name: payload.client_name,
-            riskProfile: "Custom workspace draft",
-            holdings: payload.initial_holdings.map((holding) => ({
-              ticker: holding.ticker,
-              shares: holding.shares,
-              costBasis: holding.cost_basis,
-              currentPrice: null,
-            })),
-          };
+        onCreated={async (payload) => {
+          try {
+            const response = await fetch("/api/portfolios", {
+              method: "POST",
+              headers: {
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({
+                workspace_id: workspaceId,
+                client_name: payload.client_name,
+                initial_holdings: payload.initial_holdings,
+              }),
+            });
 
-          setClients((currentClients) => [newClient, ...currentClients]);
-          setActiveClientId(newClientId);
-          setIsOpen(false);
+            const body = (await response.json()) as
+              | { portfolios: PortfolioApiRow[] }
+              | { detail?: string };
+
+            if (!response.ok) {
+              const detail = "detail" in body && body.detail ? body.detail : "Unable to create client in workspace.";
+              throw new Error(detail);
+            }
+
+            await loadWorkspacePortfolios(workspaceId);
+            setIsOpen(false);
+          } catch (error) {
+            const message = error instanceof Error ? error.message : "Unexpected workspace create error";
+            setErrorMessage(message);
+          }
         }}
       />
     </main>
