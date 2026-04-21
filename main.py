@@ -7,6 +7,7 @@ from uuid import UUID
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from langchain_classic.agents import AgentExecutor, create_openai_functions_agent
 from langchain_classic.memory import ConversationBufferWindowMemory
 from langchain_core.messages import HumanMessage, SystemMessage
