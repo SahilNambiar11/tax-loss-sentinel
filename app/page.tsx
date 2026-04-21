@@ -58,8 +58,6 @@ type PortfolioApiRow = {
   cost_basis: number;
 };
 
-const DEFAULT_WORKSPACE_ID = "00000000-0000-0000-0000-000000000001";
-
 function mapPortfolioRowsToClients(rows: PortfolioApiRow[]): Client[] {
   const grouped = new Map<string, Client>();
 
@@ -117,7 +115,7 @@ function calculateUnrealizedLoss(holding: Holding) {
 }
 
 export default function Page() {
-  const [workspaceId, setWorkspaceId] = useState(DEFAULT_WORKSPACE_ID);
+  const [workspaceId, setWorkspaceId] = useState("");
   const [workspaceInput, setWorkspaceInput] = useState("");
   const [workspaceDraftOpen, setWorkspaceDraftOpen] = useState(false);
   const [workspaceCopied, setWorkspaceCopied] = useState(false);
@@ -181,14 +179,14 @@ export default function Page() {
 
   useEffect(() => {
     const search = new URLSearchParams(window.location.search);
-    const workspaceFromUrl = search.get("workspace");
-    const resolvedWorkspaceId = workspaceFromUrl?.trim() || DEFAULT_WORKSPACE_ID;
+    const workspaceFromUrl = search.get("workspace_id");
+    const resolvedWorkspaceId = workspaceFromUrl?.trim() || crypto.randomUUID();
 
     setWorkspaceId(resolvedWorkspaceId);
     setWorkspaceInput(resolvedWorkspaceId);
 
     if (!workspaceFromUrl) {
-      search.set("workspace", resolvedWorkspaceId);
+      search.set("workspace_id", resolvedWorkspaceId);
       const query = search.toString();
       const nextUrl = query ? `${window.location.pathname}?${query}` : window.location.pathname;
       window.history.replaceState({}, "", nextUrl);
@@ -227,7 +225,7 @@ export default function Page() {
     }
 
     const nextUrl = new URL(window.location.href);
-    nextUrl.searchParams.set("workspace", nextWorkspaceId);
+    nextUrl.searchParams.set("workspace_id", nextWorkspaceId);
     window.location.href = nextUrl.toString();
   };
 

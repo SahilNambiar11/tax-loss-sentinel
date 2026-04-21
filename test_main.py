@@ -1,6 +1,7 @@
 import asyncio
 import time
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from main import (
@@ -15,6 +16,7 @@ from main import (
     AuditVerdict,
     MemoOutput,
     build_app,
+    parse_workspace_uuid,
 )
 
 
@@ -345,3 +347,12 @@ def test_checker_raises_after_three_rejections():
         assert False, "Expected ValueError"
     except ValueError as exc:
         assert "No compliant replacement found after 3 review cycles" in str(exc)
+
+
+def test_parse_workspace_uuid_rejects_invalid_value():
+    try:
+        parse_workspace_uuid("not-a-uuid")
+        assert False, "Expected HTTPException"
+    except HTTPException as exc:
+        assert exc.status_code == 400
+        assert exc.detail == "workspace_id must be a valid UUID"

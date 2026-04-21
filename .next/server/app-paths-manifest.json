@@ -1,7 +1,4 @@
 {
-  "/api/analyze/route": "app/api/analyze/route.js",
   "/api/portfolios/route": "app/api/portfolios/route.js",
-  "/api/portfolios/[id]/route": "app/api/portfolios/[id]/route.js",
-  "/_not-found/page": "app/_not-found/page.js",
   "/page": "app/page.js"
 }

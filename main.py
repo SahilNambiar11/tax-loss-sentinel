@@ -22,6 +22,16 @@ import yfinance as yf
 load_dotenv()
 
 
+def parse_workspace_uuid(raw_workspace_id: str) -> UUID:
+    candidate = (raw_workspace_id or "").strip()
+    if not candidate:
+        raise HTTPException(status_code=400, detail="workspace_id is required")
+    try:
+        return UUID(candidate)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="workspace_id must be a valid UUID") from exc
+
+
 class CompanyProfile(BaseModel):
     ticker: str
     security_name: str | None = None
@@ -181,24 +191,17 @@ class SentinelDB:
         default_holdings = [
             {
                 "workspace_id": str(workspace_id),
-                "client_name": "Oliver Brooks",
-                "ticker": "AMZN",
-                "shares": 61,
-                "cost_basis": 201.55,
+                "client_name": "Starter Portfolio",
+                "ticker": "AAPL",
+                "shares": 100,
+                "cost_basis": 180.00,
             },
             {
                 "workspace_id": str(workspace_id),
-                "client_name": "Oliver Brooks",
-                "ticker": "COST",
-                "shares": 15,
-                "cost_basis": 840.20,
-            },
-            {
-                "workspace_id": str(workspace_id),
-                "client_name": "Oliver Brooks",
-                "ticker": "NFLX",
-                "shares": 21,
-                "cost_basis": 697.40,
+                "client_name": "Starter Portfolio",
+                "ticker": "MSFT",
+                "shares": 25,
+                "cost_basis": 400.00,
             },
         ]
         response = self.client.table("portfolios").insert(default_holdings).execute()
@@ -664,9 +667,10 @@ def build_app(engine: TaxEngine | None = None) -> FastAPI:
         }
 
     @app.get("/portfolios", response_model=PortfolioListResponse)
-    async def list_portfolios(workspace_id: UUID) -> PortfolioListResponse:
+    async def list_portfolios(workspace_id: str) -> PortfolioListResponse:
+        parsed_workspace_id = parse_workspace_uuid(workspace_id)
         try:
-            portfolios = await asyncio.to_thread(resolved_db.list_workspace_portfolios, workspace_id)
+            portfolios = await asyncio.to_thread(resolved_db.list_workspace_portfolios, parsed_workspace_id)
             return PortfolioListResponse(portfolios=portfolios)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
