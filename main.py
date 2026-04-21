@@ -636,7 +636,31 @@ def build_app(engine: TaxEngine | None = None) -> FastAPI:
     resolved_engine: TaxEngine | None = engine
     if resolved_engine is None and os.getenv("OPENAI_API_KEY"):
         resolved_engine = create_engine_from_env()
+
     app = FastAPI(title="Tax-Loss Sentinel")
+
+    # --- ADDED: CORS MIDDLEWARE ---
+    # This allows your Vercel frontend to talk to this Render backend
+    raw_origins = os.getenv("ALLOWED_ORIGINS", "http://localhost:3000")
+    origins = [origin.strip() for origin in raw_origins.split(",")]
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    # --- ADDED: HEARTBEAT ROUTE ---
+    # Useful to check if the server is up at https://your-backend.onrender.com/
+    @app.get("/")
+    async def root():
+        return {
+            "status": "Sentinel Backend Active", 
+            "database_connected": resolved_db is not None,
+            "engine_active": resolved_engine is not None
+        }
 
     @app.get("/portfolios", response_model=PortfolioListResponse)
     async def list_portfolios(workspace_id: UUID) -> PortfolioListResponse:
