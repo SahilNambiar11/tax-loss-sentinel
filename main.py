@@ -3,6 +3,7 @@ import ast
 import json
 import os
 import time
+from uuid import UUID
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
@@ -75,6 +76,49 @@ class AnalyzeResponse(BaseModel):
     result: TLHAnalysisResult
 
 
+class PortfolioRecord(BaseModel):
+    id: str
+    workspace_id: str
+    client_name: str
+    ticker: str
+    shares: float
+    cost_basis: float
+
+    model_config = ConfigDict(extra="ignore")
+
+    @field_validator("id", "workspace_id", mode="before")
+    @classmethod
+    def stringify_identifiers(cls, value: object) -> str:
+        if value is None:
+            return ""
+        return str(value)
+
+
+class PortfolioSeedHolding(BaseModel):
+    ticker: str
+    shares: float
+    cost_basis: float
+
+
+class PortfolioCreateRequest(BaseModel):
+    workspace_id: UUID
+    client_name: str
+    initial_holdings: list[PortfolioSeedHolding]
+
+
+class PortfolioUpdateRequest(BaseModel):
+    shares: float
+    cost_basis: float
+
+
+class PortfolioListResponse(BaseModel):
+    portfolios: list[PortfolioRecord]
+
+
+class PortfolioResponse(BaseModel):
+    portfolio: PortfolioRecord
+
+
 class StrategistProposal(BaseModel):
     proposed_twin: TwinMatch
     rationale: str
@@ -125,6 +169,90 @@ class SentinelDB:
         rejected = {ticker.upper() for ticker in (rejected_tickers or [])}
         filtered_matches = [match for match in matches if match.ticker.upper() not in rejected]
         return filtered_matches[:match_count]
+
+    def ensure_workspace_exists(self, workspace_id: UUID) -> None:
+        self.client.table("workspaces").upsert({"id": str(workspace_id)}, on_conflict="id").execute()
+
+    def _portfolio_select(self) -> str:
+        return "id, workspace_id, client_name, ticker, shares, cost_basis"
+
+    def seed_default_portfolio(self, workspace_id: UUID) -> list[PortfolioRecord]:
+        default_holdings = [
+            {
+                "workspace_id": str(workspace_id),
+                "client_name": "Oliver Brooks",
+                "ticker": "AMZN",
+                "shares": 61,
+                "cost_basis": 201.55,
+            },
+            {
+                "workspace_id": str(workspace_id),
+                "client_name": "Oliver Brooks",
+                "ticker": "COST",
+                "shares": 15,
+                "cost_basis": 840.20,
+            },
+            {
+                "workspace_id": str(workspace_id),
+                "client_name": "Oliver Brooks",
+                "ticker": "NFLX",
+                "shares": 21,
+                "cost_basis": 697.40,
+            },
+        ]
+        response = self.client.table("portfolios").insert(default_holdings).execute()
+        return [PortfolioRecord.model_validate(row) for row in (response.data or [])]
+
+    def list_workspace_portfolios(self, workspace_id: UUID) -> list[PortfolioRecord]:
+        self.ensure_workspace_exists(workspace_id)
+        response = (
+            self.client.table("portfolios")
+            .select(self._portfolio_select())
+            .eq("workspace_id", str(workspace_id))
+            .order("client_name")
+            .order("ticker")
+            .execute()
+        )
+        rows = [PortfolioRecord.model_validate(row) for row in (response.data or [])]
+        if rows:
+            return rows
+        return self.seed_default_portfolio(workspace_id)
+
+    def create_portfolio(
+        self,
+        workspace_id: UUID,
+        client_name: str,
+        initial_holdings: list[PortfolioSeedHolding],
+    ) -> list[PortfolioRecord]:
+        self.ensure_workspace_exists(workspace_id)
+        rows = [
+            {
+                "workspace_id": str(workspace_id),
+                "client_name": client_name,
+                "ticker": holding.ticker.upper(),
+                "shares": holding.shares,
+                "cost_basis": holding.cost_basis,
+            }
+            for holding in initial_holdings
+        ]
+        response = self.client.table("portfolios").insert(rows).execute()
+        return [PortfolioRecord.model_validate(row) for row in (response.data or [])]
+
+    def update_portfolio(self, portfolio_id: str, payload: PortfolioUpdateRequest) -> PortfolioRecord:
+        response = (
+            self.client.table("portfolios")
+            .update(
+                {
+                    "shares": payload.shares,
+                    "cost_basis": payload.cost_basis,
+                }
+            )
+            .eq("id", portfolio_id)
+            .execute()
+        )
+        if not response.data:
+            raise ValueError("Portfolio row not found")
+        return PortfolioRecord.model_validate(response.data[0])
 
 
 class MarketData:
@@ -461,24 +589,91 @@ class TaxEngine:
             session_id=session_id,
         )
 
+    async def list_workspace_portfolios(self, workspace_id: UUID) -> list[PortfolioRecord]:
+        return await asyncio.to_thread(self.db.list_workspace_portfolios, workspace_id)
 
-def create_engine_from_env() -> TaxEngine:
+    async def create_portfolio(
+        self,
+        workspace_id: UUID,
+        client_name: str,
+        initial_holdings: list[PortfolioSeedHolding],
+    ) -> list[PortfolioRecord]:
+        return await asyncio.to_thread(
+            self.db.create_portfolio,
+            workspace_id,
+            client_name,
+            initial_holdings,
+        )
+
+    async def update_portfolio(self, portfolio_id: str, payload: PortfolioUpdateRequest) -> PortfolioRecord:
+        return await asyncio.to_thread(self.db.update_portfolio, portfolio_id, payload)
+
+
+def create_db_from_env() -> SentinelDB:
     supabase_url = os.getenv("SUPABASE_URL")
     supabase_service_key = os.getenv("SUPABASE_SERVICE_KEY")
+
+    if not supabase_url or not supabase_service_key:
+        raise RuntimeError("Missing required environment variables for Supabase")
+
+    return SentinelDB(supabase_url, supabase_service_key)
+
+
+def create_engine_from_env() -> TaxEngine:
     openai_api_key = os.getenv("OPENAI_API_KEY")
 
-    if not supabase_url or not supabase_service_key or not openai_api_key:
-        raise RuntimeError("Missing required environment variables for Supabase or OpenAI")
+    if not openai_api_key:
+        raise RuntimeError("Missing required environment variables for OpenAI")
 
-    db = SentinelDB(supabase_url, supabase_service_key)
+    db = create_db_from_env()
     market_data = MarketData(ttl_seconds=300)
     checker = MultiAgentChecker(db=db, market_data=market_data, api_key=openai_api_key)
     return TaxEngine(db, market_data, checker)
 
 
 def build_app(engine: TaxEngine | None = None) -> FastAPI:
-    resolved_engine = engine or create_engine_from_env()
+    resolved_db = engine.db if engine is not None else create_db_from_env()
+    resolved_engine: TaxEngine | None = engine
+    if resolved_engine is None and os.getenv("OPENAI_API_KEY"):
+        resolved_engine = create_engine_from_env()
     app = FastAPI(title="Tax-Loss Sentinel")
+
+    @app.get("/portfolios", response_model=PortfolioListResponse)
+    async def list_portfolios(workspace_id: UUID) -> PortfolioListResponse:
+        try:
+            portfolios = await asyncio.to_thread(resolved_db.list_workspace_portfolios, workspace_id)
+            return PortfolioListResponse(portfolios=portfolios)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Unable to fetch portfolios: {exc}") from exc
+
+    @app.post("/portfolios", response_model=PortfolioListResponse)
+    async def create_portfolio(request: PortfolioCreateRequest) -> PortfolioListResponse:
+        if not request.initial_holdings:
+            raise HTTPException(status_code=400, detail="At least one initial holding is required")
+        try:
+            portfolios = await asyncio.to_thread(
+                resolved_db.create_portfolio,
+                request.workspace_id,
+                request.client_name,
+                request.initial_holdings,
+            )
+            return PortfolioListResponse(portfolios=portfolios)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Unable to create portfolio: {exc}") from exc
+
+    @app.patch("/portfolios/{portfolio_id}", response_model=PortfolioResponse)
+    async def update_portfolio(portfolio_id: str, request: PortfolioUpdateRequest) -> PortfolioResponse:
+        try:
+            portfolio = await asyncio.to_thread(resolved_db.update_portfolio, portfolio_id, request)
+            return PortfolioResponse(portfolio=portfolio)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Unable to update portfolio: {exc}") from exc
 
     @app.get("/analyze", response_model=AnalyzeResponse)
     async def analyze(
@@ -486,6 +681,11 @@ def build_app(engine: TaxEngine | None = None) -> FastAPI:
         buy_price: float,
         session_id: str = "default",
     ) -> AnalyzeResponse:
+        if resolved_engine is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Analyze endpoint requires OPENAI_API_KEY in addition to Supabase configuration.",
+            )
         try:
             result = await resolved_engine.analyze_tlh_opportunity(ticker, buy_price, session_id=session_id)
             return AnalyzeResponse(result=result)
@@ -495,7 +695,7 @@ def build_app(engine: TaxEngine | None = None) -> FastAPI:
     return app
 
 
-app = build_app() if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_KEY") and os.getenv("OPENAI_API_KEY") else FastAPI(title="Tax-Loss Sentinel")
+app = build_app() if os.getenv("SUPABASE_URL") and os.getenv("SUPABASE_SERVICE_KEY") else FastAPI(title="Tax-Loss Sentinel")
 
 
 if __name__ == "__main__":

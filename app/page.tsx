@@ -2,13 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { FileText, Search, Shield } from "lucide-react";
+import { FileText, Plus, Search, Shield } from "lucide-react";
+import AddClientModal from "./components/AddClientModal";
 
 type Holding = {
   ticker: string;
   shares: number;
   costBasis: number;
-  currentPrice: number;
+  currentPrice: number | null;
 };
 
 type Client = {
@@ -116,12 +117,16 @@ function formatCurrency(value: number) {
 }
 
 function calculateUnrealizedLoss(holding: Holding) {
+  if (holding.currentPrice === null) {
+    return null;
+  }
   return (holding.costBasis - holding.currentPrice) * holding.shares;
 }
 
 export default function Page() {
   const [clients, setClients] = useState<Client[]>(INITIAL_CLIENTS);
   const [activeClientId, setActiveClientId] = useState(INITIAL_CLIENTS[0]?.id ?? "");
+  const [isOpen, setIsOpen] = useState(false);
   const [isRunning, setIsRunning] = useState(false);
   const [agentLogs, setAgentLogs] = useState<string[]>([]);
   const [proposedTrade, setProposedTrade] = useState<ProposedTrade | null>(null);
@@ -198,6 +203,28 @@ export default function Page() {
       if (runIdRef.current !== runId) {
         return;
       }
+
+      setClients((currentClients) =>
+        currentClients.map((client) =>
+          client.id === activeClient.id
+            ? {
+                ...client,
+                holdings: client.holdings.map((holding) => {
+                  const matchingResponse = responses.find(
+                    ({ analysis }) => analysis.ticker === holding.ticker,
+                  );
+
+                  return matchingResponse
+                    ? {
+                        ...holding,
+                        currentPrice: matchingResponse.analysis.price_data.current_price,
+                      }
+                    : holding;
+                }),
+              }
+            : client,
+        ),
+      );
 
       responses.forEach(({ holding, analysis }) => {
         addLog(
@@ -292,6 +319,15 @@ export default function Page() {
             })}
           </div>
 
+          <button
+            type="button"
+            onClick={() => setIsOpen(true)}
+            className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-2xl border border-emerald-400/20 bg-zinc-900 px-4 py-3 text-sm font-semibold text-slate-100 transition hover:border-emerald-400/40 hover:bg-zinc-800"
+          >
+            <Plus className="h-4 w-4 text-emerald-300" />
+            New Client
+          </button>
+
           <div className="mt-6 rounded-3xl border border-slate-800 bg-slate-950/60 p-4">
             <p className="text-xs uppercase tracking-[0.35em] text-emerald-300/70">Sentinel Status</p>
             <div className="mt-4 space-y-3">
@@ -347,15 +383,17 @@ export default function Page() {
                 <tbody>
                   {activeClient.holdings.map((holding) => {
                     const unrealizedLoss = calculateUnrealizedLoss(holding);
-                    const hasLoss = unrealizedLoss > 0;
+                    const hasLoss = (unrealizedLoss ?? 0) > 0;
                     return (
                       <tr key={holding.ticker} className="border-t border-slate-800/80">
                         <td className="px-5 py-4 font-medium text-white">{holding.ticker}</td>
                         <td className="px-5 py-4 text-slate-300">{holding.shares}</td>
                         <td className="px-5 py-4 text-slate-300">{formatCurrency(holding.costBasis)}</td>
-                        <td className="px-5 py-4 text-slate-300">{formatCurrency(holding.currentPrice)}</td>
+                        <td className="px-5 py-4 text-slate-300">
+                          {holding.currentPrice === null ? "Live on analysis" : formatCurrency(holding.currentPrice)}
+                        </td>
                         <td className={`px-5 py-4 font-medium ${hasLoss ? "text-rose-400" : "text-emerald-300"}`}>
-                          {hasLoss ? formatCurrency(unrealizedLoss) : formatCurrency(unrealizedLoss)}
+                          {unrealizedLoss === null ? "Run Sentinel" : formatCurrency(unrealizedLoss)}
                         </td>
                       </tr>
                     );
@@ -534,6 +572,29 @@ export default function Page() {
           </motion.div>
         ) : null}
       </AnimatePresence>
+
+      <AddClientModal
+        isOpen={isOpen}
+        onClose={() => setIsOpen(false)}
+        onCreated={(payload) => {
+          const newClientId = `cl-${Date.now()}`;
+          const newClient = {
+            id: newClientId,
+            name: payload.client_name,
+            riskProfile: "Custom workspace draft",
+            holdings: payload.initial_holdings.map((holding) => ({
+              ticker: holding.ticker,
+              shares: holding.shares,
+              costBasis: holding.cost_basis,
+              currentPrice: null,
+            })),
+          };
+
+          setClients((currentClients) => [newClient, ...currentClients]);
+          setActiveClientId(newClientId);
+          setIsOpen(false);
+        }}
+      />
     </main>
   );
 }
